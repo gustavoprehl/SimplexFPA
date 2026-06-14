@@ -31,6 +31,15 @@ import java.util.*;
  *   1..n      → variáveis de decisão originais (inicialmente não-básicas)
  *   n+1..n+m  → variáveis de folga (slack) introduzidas para as restrições
  *   n+m+1     → variável artificial x_0 (usada apenas na inicialização)
+ *
+ * -----------------------------------------------------------------------------
+ * VISUALIZAÇÃO
+ * -----------------------------------------------------------------------------
+ * Em vez de imprimir cada passo no terminal, esta classe registra um "histórico"
+ * (lista de Step) com o estado completo da forma slack antes de cada pivô, além
+ * de qual variável entra/sai e o teste da razão. Esse histórico é exportado como
+ * JSON (método exportJson) e renderizado por SimplexVisualizer em uma página
+ * HTML interativa (ver SimplexDemo).
  * =============================================================================
  */
 public class Simplex {
@@ -48,6 +57,11 @@ public class Simplex {
 
     private int origN; // n original (vars de decisão)
     private int origM; // m original (restrições)
+
+    // PL original, guardado apenas para exibição/exportação
+    private double[][] problemA;
+    private double[] problemB;
+    private double[] problemC;
 
     /** Índices das variáveis não-básicas (array de tamanho variável) */
     private int[] N;
@@ -77,6 +91,15 @@ public class Simplex {
     /** Valor atual da função objetivo (com todas vars não-básicas = 0) */
     private double v;
 
+    /** true se foi necessário resolver o PL auxiliar (Fase I) */
+    private boolean phaseIUsed;
+
+    /** Histórico de passos (snapshots da forma slack) para visualização */
+    private List<Step> steps;
+
+    /** Resultado da última chamada a solve() */
+    private Result lastResult;
+
     // -------------------------------------------------------------------------
     // Classe de resultado
     // -------------------------------------------------------------------------
@@ -92,6 +115,49 @@ public class Simplex {
             this.status = s;
             this.optimalValue = val;
             this.solution = sol;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Snapshot de um passo do algoritmo (estado da forma slack + pivô seguinte)
+    // -------------------------------------------------------------------------
+
+    public static class Step {
+        String title;
+        String description;
+
+        int[] N;
+        int[] B;
+        double[][] A;
+        double[] b;
+        double[] c;
+        double v;
+
+        // Pivô que leva deste passo para o próximo (null no último passo)
+        Integer entering;  // variável que entra na base (índice global)
+        Integer leaving;   // variável que sai da base (índice global)
+        Integer pivotRow;  // posição em B da variável que sai
+        Integer pivotCol;  // posição em N da variável que entra
+        double[] ratios;   // Δ_i do teste da razão (mesma ordem de B); null se não aplicável
+
+        String toJson() {
+            StringBuilder sb = new StringBuilder();
+            sb.append("{");
+            sb.append("\"title\":").append(jsonStr(title)).append(",");
+            sb.append("\"description\":").append(jsonStr(description)).append(",");
+            sb.append("\"N\":").append(jsonArr(N)).append(",");
+            sb.append("\"B\":").append(jsonArr(B)).append(",");
+            sb.append("\"A\":").append(jsonMatrix(A)).append(",");
+            sb.append("\"b\":").append(jsonArr(b)).append(",");
+            sb.append("\"c\":").append(jsonArr(c)).append(",");
+            sb.append("\"v\":").append(jsonNum(v)).append(",");
+            sb.append("\"entering\":").append(jsonNullableInt(entering)).append(",");
+            sb.append("\"leaving\":").append(jsonNullableInt(leaving)).append(",");
+            sb.append("\"pivotRow\":").append(jsonNullableInt(pivotRow)).append(",");
+            sb.append("\"pivotCol\":").append(jsonNullableInt(pivotCol)).append(",");
+            sb.append("\"ratios\":").append(ratios == null ? "null" : jsonArr(ratios));
+            sb.append("}");
+            return sb.toString();
         }
     }
 
@@ -112,6 +178,26 @@ public class Simplex {
         for (int i = 0; i < mat.length; i++)
             copy[i] = mat[i].clone();
         return copy;
+    }
+
+    /** Registra um snapshot do estado atual da forma slack no histórico */
+    private void recordStep(String title, String description, Integer entering, Integer leaving,
+                             Integer pivotRow, Integer pivotCol, double[] ratios) {
+        Step s = new Step();
+        s.title = title;
+        s.description = description;
+        s.N = N.clone();
+        s.B = B.clone();
+        s.A = deepCopy(A);
+        s.b = b.clone();
+        s.c = c.clone();
+        s.v = v;
+        s.entering = entering;
+        s.leaving = leaving;
+        s.pivotRow = pivotRow;
+        s.pivotCol = pivotCol;
+        s.ratios = ratios;
+        steps.add(s);
     }
 
     // =========================================================================
@@ -199,12 +285,96 @@ public class Simplex {
     }
 
     // =========================================================================
+    // LOOP PRINCIPAL DO SIMPLEX  (CLRS, p. 871, linhas 3–12)
+    // =========================================================================
+    /**
+     * Executa iterações do Simplex (regra de Bland) a partir do estado atual de
+     * N, B, A, b, c, v, registrando um Step ANTES de cada pivô — esse Step mostra
+     * a forma slack corrente e já indica qual variável vai entrar/sair e qual o
+     * elemento de pivô, para permitir destacar isso na visualização.
+     *
+     * O último Step registrado (quando ótimo ou ilimitado) não tem pivô seguinte.
+     *
+     * @param phasePrefix prefixo usado nos títulos dos passos ("Fase I — ", "Fase II — " ou "")
+     * @return true se a solução ótima foi encontrada, false se o PL é ilimitado
+     */
+    private boolean runSimplexLoop(String phasePrefix) {
+        int iteration = 0;
+        while (true) {
+            iteration++;
+
+            // Escolha da variável ENTRANTE 'e' pela regra de Bland:
+            // menor índice j em N com c_j > 0 (garante terminação, sem ciclagem)
+            int e = -1;
+            int smallestE = Integer.MAX_VALUE;
+            for (int j = 0; j < N.length; j++) {
+                if (c[j] > EPS && N[j] < smallestE) {
+                    smallestE = N[j];
+                    e = N[j];
+                }
+            }
+
+            // Se não há c_j > 0, a solução atual é ÓTIMA
+            if (e == -1) {
+                recordStep(phasePrefix + "Solução ótima",
+                        "Nenhum coeficiente de c é positivo: a solução básica atual já é ótima.",
+                        null, null, null, null, null);
+                return true;
+            }
+
+            int ePos = pos(N, e);
+
+            // Teste da razão: Δ_i = b_i / a_{ie} para cada i em B com a_{ie} > 0
+            double[] ratios = new double[B.length];
+            int l = -1;
+            double minDelta = Double.POSITIVE_INFINITY;
+            int smallestL = Integer.MAX_VALUE;
+
+            for (int i = 0; i < B.length; i++) {
+                if (A[i][ePos] > EPS) {
+                    ratios[i] = b[i] / A[i][ePos];
+                    // Regra de Bland para desempate: menor índice entre empates
+                    if (ratios[i] < minDelta - EPS ||
+                            (Math.abs(ratios[i] - minDelta) < EPS && B[i] < smallestL)) {
+                        minDelta = ratios[i];
+                        l = B[i];
+                        smallestL = B[i];
+                    }
+                } else {
+                    ratios[i] = Double.POSITIVE_INFINITY;
+                }
+            }
+
+            // Se Δ_i = ∞ para todo i, o PL é ILIMITADO
+            if (l == -1) {
+                recordStep(phasePrefix + "Iteração " + iteration,
+                        String.format(Locale.US,
+                                "Variável entrante x_%d não possui razão mínima finita "
+                                + "(coeficientes não-positivos na coluna): o PL é ilimitado.", e),
+                        e, null, null, ePos, ratios);
+                return false;
+            }
+
+            int lPos = pos(B, l);
+            recordStep(phasePrefix + "Iteração " + iteration,
+                    String.format(Locale.US,
+                            "Variável entrante: x_%d (regra de Bland). "
+                            + "Variável sainte: x_%d (razão mínima Δ = %.4f).", e, l, minDelta),
+                    e, l, lPos, ePos, ratios);
+
+            pivot(l, e);
+        }
+    }
+
+    // =========================================================================
     // PROCEDIMENTO SIMPLEX PRINCIPAL  (CLRS, p. 871)
     // =========================================================================
     /**
      * SIMPLEX(A, b, c)  — Algoritmo Simplex conforme CLRS.
      *
      * Recebe o PL na forma padrão e retorna a solução ótima (se existir).
+     * O histórico de passos fica disponível em getSteps()/exportJson() para
+     * visualização em HTML.
      *
      * COMPLEXIDADE:
      *   - Cada iteração do while executa um PIVOT em O(n*m).
@@ -223,108 +393,35 @@ public class Simplex {
     public Result solve(double[][] origA, double[] origb, double[] origc) {
         origN = origc.length;
         origM = origb.length;
+        problemA = origA;
+        problemB = origb;
+        problemC = origc;
+        steps = new ArrayList<>();
 
-        System.out.println("╔══════════════════════════════════════════════════════╗");
-        System.out.println("║         ALGORITMO SIMPLEX — CLRS Cap. 29            ║");
-        System.out.println("╚══════════════════════════════════════════════════════╝");
-        printLP(origA, origb, origc);
-
-        // -----------------------------------------------------------------
         // CLRS linha 1: Inicializa a forma slack (ou detecta infeasibilidade)
-        // -----------------------------------------------------------------
         boolean feasible = initializeSimplex(origA, origb, origc);
         if (!feasible) {
-            System.out.println("\n[RESULTADO] PL INFEASÍVEL — não existe solução viável.");
-            return new Result(Result.Status.INFEASIBLE, 0, null);
+            lastResult = new Result(Result.Status.INFEASIBLE, 0, null);
+            return lastResult;
         }
 
-        System.out.println("\n--- Forma slack inicial ---");
-        printSlackForm();
-
-        int iteration = 0;
-
-        // -----------------------------------------------------------------
-        // CLRS linhas 3–12: Loop principal — repete enquanto há c_j > 0
-        // -----------------------------------------------------------------
-        while (true) {
-            iteration++;
-
-            // CLRS linha 4: Escolha da variável ENTRANTE 'e'
-            // Regra de Bland: escolha o menor índice j em N com c_j > 0
-            // (garante terminação — sem ciclagem)
-            int e = -1;
-            int smallestE = Integer.MAX_VALUE;
-            for (int j = 0; j < N.length; j++) {
-                if (c[j] > EPS && N[j] < smallestE) {
-                    smallestE = N[j];
-                    e = N[j];
-                }
-            }
-
-            // CLRS linha 3: Se não há c_j > 0, a solução atual é ÓTIMA
-            if (e == -1) break;
-
-            int ePos = pos(N, e);
-            System.out.printf("%n--- Iteração %d ---  variável ENTRANTE: x_%d%n", iteration, e);
-
-            // CLRS linhas 5–8: Calcula Δ_i = b_i / a_{ie} para cada i em B com a_{ie} > 0
-            double[] delta = new double[B.length];
-            int l = -1;
-            double minDelta = Double.POSITIVE_INFINITY;
-            int smallestL = Integer.MAX_VALUE;
-
-            System.out.printf("  Razões mínimas (teste de razão):%n");
-            for (int i = 0; i < B.length; i++) {
-                if (A[i][ePos] > EPS) {
-                    delta[i] = b[i] / A[i][ePos];
-                    System.out.printf("    x_%d: Δ = %.4f / %.4f = %.4f%n",
-                            B[i], b[i], A[i][ePos], delta[i]);
-                    // Regra de Bland para desempate: menor índice entre empates
-                    if (delta[i] < minDelta - EPS ||
-                            (Math.abs(delta[i] - minDelta) < EPS && B[i] < smallestL)) {
-                        minDelta = delta[i];
-                        l = B[i];
-                        smallestL = B[i];
-                    }
-                } else {
-                    delta[i] = Double.POSITIVE_INFINITY;
-                    System.out.printf("    x_%d: Δ = ∞ (coeficiente não-positivo)%n", B[i]);
-                }
-            }
-
-            // CLRS linhas 10–11: Se Δ_l = ∞ para todo i, o PL é ILIMITADO
-            if (l == -1) {
-                System.out.println("\n[RESULTADO] PL ILIMITADO — função objetivo cresce indefinidamente.");
-                return new Result(Result.Status.UNBOUNDED, 0, null);
-            }
-
-            System.out.printf("  variável SAINTE: x_%d  (Δ mínimo = %.4f)%n", l, minDelta);
-
-            // CLRS linha 12: Executa o pivô
-            pivot(l, e);
-
-            System.out.printf("  Valor objetivo atual: z = %.4f%n", v);
-            printSlackForm();
+        // CLRS linhas 3–12: Loop principal
+        boolean optimal = runSimplexLoop(phaseIUsed ? "Fase II — " : "");
+        if (!optimal) {
+            lastResult = new Result(Result.Status.UNBOUNDED, 0, null);
+            return lastResult;
         }
 
-        // -----------------------------------------------------------------
         // CLRS linhas 13–17: Extrai solução ótima
         // x_i = b[pos(B,i)] se i está na base, senão 0
-        // -----------------------------------------------------------------
         double[] x = new double[origN];
         for (int i = 1; i <= origN; i++) {
             int bPos = pos(B, i);
             x[i - 1] = (bPos != -1) ? b[bPos] : 0.0;
         }
 
-        System.out.println("\n╔══════════════════════════════════╗");
-        System.out.println("║         SOLUÇÃO ÓTIMA            ║");
-        System.out.println("╚══════════════════════════════════╝");
-        System.out.printf("  Valor ótimo: z* = %.6f%n", v);
-        for (int i = 0; i < origN; i++)
-            System.out.printf("  x_%d = %.6f%n", i + 1, x[i]);
-
-        return new Result(Result.Status.OPTIMAL, v, x);
+        lastResult = new Result(Result.Status.OPTIMAL, v, x);
+        return lastResult;
     }
 
     // =========================================================================
@@ -360,7 +457,8 @@ public class Simplex {
         // CASO 1: Solução básica inicial já é viável
         // -----------------------------------------------------------------
         if (origb[kMin] >= -EPS) {
-            System.out.println("\n[INIT] Solução básica inicial é viável (todos b_i >= 0).");
+            phaseIUsed = false;
+
             N = new int[n];
             B = new int[m];
             A = new double[m][n];
@@ -380,10 +478,9 @@ public class Simplex {
         }
 
         // -----------------------------------------------------------------
-        // CASO 2: Precisa do PL auxiliar
+        // CASO 2: Precisa do PL auxiliar (Fase I)
         // -----------------------------------------------------------------
-        System.out.printf("%n[INIT] b[%d] = %.4f < 0 → resolvendo PL AUXILIAR Laux...%n",
-                kMin, origb[kMin]);
+        phaseIUsed = true;
 
         int x0 = n + m + 1; // índice global da variável artificial x_0
 
@@ -410,48 +507,30 @@ public class Simplex {
         }
         c[n] = -1.0; // maximizar -x_0
 
+        recordStep("Fase I — PL auxiliar (forma aumentada)",
+                String.format(Locale.US,
+                        "b_%d = %.4f < 0: a origem não é viável. Introduzimos a variável "
+                        + "artificial x_%d e fazemos um pivô forçado (x_%d sai, x_%d entra) "
+                        + "para obter uma base viável do PL auxiliar Laux: maximizar -x_%d.",
+                        B[kMin], origb[kMin], x0, B[kMin], x0, x0),
+                x0, B[kMin], kMin, pos(N, x0), null);
+
         // Pivô inicial: x_0 entra, B[kMin] sai (torna solução viável para Laux)
         pivot(B[kMin], x0);
 
         // ---- Loop Simplex para Laux ----
-        while (true) {
-            int e = -1;
-            int smallestE = Integer.MAX_VALUE;
-            for (int j = 0; j < N.length; j++) {
-                if (c[j] > EPS && N[j] < smallestE) {
-                    smallestE = N[j];
-                    e = N[j];
-                }
-            }
-            if (e == -1) break;
-
-            int ePos = pos(N, e);
-            int l = -1;
-            double minDelta = Double.POSITIVE_INFINITY;
-            int smallestL = Integer.MAX_VALUE;
-
-            for (int i = 0; i < B.length; i++) {
-                if (A[i][ePos] > EPS) {
-                    double d = b[i] / A[i][ePos];
-                    if (d < minDelta - EPS ||
-                            (Math.abs(d - minDelta) < EPS && B[i] < smallestL)) {
-                        minDelta = d;
-                        l = B[i];
-                        smallestL = B[i];
-                    }
-                }
-            }
-            if (l == -1) break; // ilimitado (não deve ocorrer no Laux)
-            pivot(l, e);
-        }
+        runSimplexLoop("Fase I — ");
 
         // Verifica viabilidade: ótimo de Laux deve ser 0 (x_0 = 0)
         if (v < -EPS) {
-            System.out.printf("[INIT] Ótimo de Laux = %.6f < 0 → PL original INFEASÍVEL.%n", v);
+            recordStep("PL infeasível",
+                    String.format(Locale.US,
+                            "O ótimo do PL auxiliar é %.6f < 0, ou seja, x_%d > 0 em qualquer "
+                            + "solução viável de Laux. Logo, o PL original não admite solução viável.",
+                            v, x0),
+                    null, null, null, null, null);
             return false;
         }
-
-        System.out.printf("[INIT] Ótimo de Laux = %.6f ≈ 0 → PL original é VIÁVEL.%n", v);
 
         // Se x_0 ainda está na base (com valor 0), pivota-a para fora
         int x0Pos = pos(B, x0);
@@ -459,6 +538,12 @@ public class Simplex {
             // Busca qualquer var não-básica j com A[x0Pos][j] ≠ 0 para pivot degenerado
             for (int j = 0; j < N.length; j++) {
                 if (N[j] != x0 && Math.abs(A[x0Pos][j]) > EPS) {
+                    recordStep("Fase I — Removendo variável artificial da base",
+                            String.format(Locale.US,
+                                    "x_%d = 0 ainda está na base. Pivô degenerado para retirá-la "
+                                    + "(x_%d entra no lugar de x_%d).",
+                                    x0, N[j], x0),
+                            N[j], x0, x0Pos, j, null);
                     pivot(B[x0Pos], N[j]);
                     break;
                 }
@@ -510,46 +595,109 @@ public class Simplex {
     }
 
     // =========================================================================
-    // Utilitário: imprime a forma slack atual
+    // Exportação para visualização HTML
     // =========================================================================
-    private void printSlackForm() {
-        System.out.printf("  z = %.4f", v);
-        for (int j = 0; j < N.length; j++) {
-            if (Math.abs(c[j]) > EPS)
-                System.out.printf(" %+.4f·x_%d", c[j], N[j]);
-        }
-        System.out.println();
-        for (int i = 0; i < B.length; i++) {
-            System.out.printf("  x_%d = %.4f", B[i], b[i]);
-            for (int j = 0; j < N.length; j++) {
-                if (Math.abs(A[i][j]) > EPS)
-                    System.out.printf(" %+.4f·x_%d", -A[i][j], N[j]);
-            }
-            System.out.println();
-        }
+
+    /** @return histórico de passos da última chamada a solve() */
+    public List<Step> getSteps() {
+        return steps;
     }
 
-    // =========================================================================
-    // Utilitário: imprime o PL na forma padrão
-    // =========================================================================
-    private void printLP(double[][] origA, double[] origb, double[] origc) {
-        System.out.println("\nPL na forma padrão:");
-        System.out.print("  maximizar  ");
-        for (int j = 0; j < origN; j++) {
-            if (j == 0) System.out.printf("%.4f·x_%d", origc[j], j + 1);
-            else        System.out.printf(" %+.4f·x_%d", origc[j], j + 1);
-        }
-        System.out.println();
-        System.out.println("  sujeito a:");
-        for (int i = 0; i < origM; i++) {
-            System.out.print("    ");
-            for (int j = 0; j < origN; j++) {
-                if (j == 0) System.out.printf("%.4f·x_%d", origA[i][j], j + 1);
-                else        System.out.printf(" %+.4f·x_%d", origA[i][j], j + 1);
-            }
-            System.out.printf(" <= %.4f%n", origb[i]);
-        }
-        System.out.println("    x_j >= 0  para todo j");
+    /** @return resultado da última chamada a solve() */
+    public Result getResult() {
+        return lastResult;
     }
 
+    /**
+     * Serializa o PL, o histórico de passos e o resultado da última chamada a
+     * solve() como um objeto JSON, para ser consumido por SimplexVisualizer.
+     *
+     * @param label rótulo do exemplo (exibido na página HTML)
+     */
+    public String exportJson(String label) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{");
+        sb.append("\"label\":").append(jsonStr(label)).append(",");
+
+        sb.append("\"problem\":{");
+        sb.append("\"n\":").append(origN).append(",");
+        sb.append("\"m\":").append(origM).append(",");
+        sb.append("\"c\":").append(jsonArr(problemC)).append(",");
+        sb.append("\"A\":").append(jsonMatrix(problemA)).append(",");
+        sb.append("\"b\":").append(jsonArr(problemB));
+        sb.append("},");
+
+        sb.append("\"steps\":[");
+        for (int i = 0; i < steps.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append(steps.get(i).toJson());
+        }
+        sb.append("],");
+
+        sb.append("\"result\":{");
+        sb.append("\"status\":").append(jsonStr(lastResult.status.name())).append(",");
+        sb.append("\"value\":").append(jsonNum(lastResult.optimalValue)).append(",");
+        sb.append("\"solution\":").append(lastResult.solution == null ? "null" : jsonArr(lastResult.solution));
+        sb.append("}");
+
+        sb.append("}");
+        return sb.toString();
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers de serialização JSON (sem dependências externas)
+    // -------------------------------------------------------------------------
+
+    static String jsonNum(double d) {
+        if (Double.isInfinite(d) || Double.isNaN(d)) return "null";
+        if (d == 0) d = 0; // normaliza -0.0
+        return String.valueOf(d);
+    }
+
+    static String jsonArr(double[] arr) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < arr.length; i++) {
+            if (i > 0) sb.append(",");
+            sb.append(jsonNum(arr[i]));
+        }
+        return sb.append("]").toString();
+    }
+
+    static String jsonArr(int[] arr) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < arr.length; i++) {
+            if (i > 0) sb.append(",");
+            sb.append(arr[i]);
+        }
+        return sb.append("]").toString();
+    }
+
+    static String jsonMatrix(double[][] mat) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < mat.length; i++) {
+            if (i > 0) sb.append(",");
+            sb.append(jsonArr(mat[i]));
+        }
+        return sb.append("]").toString();
+    }
+
+    static String jsonStr(String s) {
+        if (s == null) return "null";
+        StringBuilder sb = new StringBuilder("\"");
+        for (int i = 0; i < s.length(); i++) {
+            char ch = s.charAt(i);
+            switch (ch) {
+                case '"':  sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': break;
+                default:   sb.append(ch);
+            }
+        }
+        return sb.append("\"").toString();
+    }
+
+    static String jsonNullableInt(Integer v) {
+        return v == null ? "null" : String.valueOf(v);
+    }
 }

@@ -1,0 +1,109 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazil]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+
+% ---------------------------------------------------------------------------
+% Configuração do listings para código Java com comentários em português
+% (acentos via inputenc/T1; o "Delta" de 1042 é tratado via bytes UTF-8 crus
+% porque o símbolo grego não é coberto pelo inputenc utf8 padrão)
+% ---------------------------------------------------------------------------
+\definecolor{codebg}{rgb}{0.96,0.96,0.96}
+\definecolor{codegreen}{rgb}{0,0.5,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+
+\lstdefinestyle{javastyle}{
+    backgroundcolor=\color{codebg},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{blue}\bfseries,
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=6pt,
+    numberstyle=\tiny\color{codegray},
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=4,
+    frame=single,
+    language=Java,
+    extendedchars=true,
+    literate=
+        {á}{{\'a}}1 {à}{{\`a}}1 {ã}{{\~a}}1 {â}{{\^a}}1
+        {é}{{\'e}}1 {ê}{{\^e}}1
+        {í}{{\'i}}1
+        {ó}{{\'o}}1 {ô}{{\^o}}1 {õ}{{\~o}}1
+        {ú}{{\'u}}1
+        {ç}{{\c c}}1
+        {Á}{{\'A}}1 {À}{{\`A}}1 {Ã}{{\~A}}1 {Â}{{\^A}}1
+        {É}{{\'E}}1 {Ê}{{\^E}}1
+        {Í}{{\'I}}1
+        {Ó}{{\'O}}1 {Ô}{{\^O}}1 {Õ}{{\~O}}1
+        {Ú}{{\'U}}1
+        {Ç}{{\c C}}1
+        {^^ce^^94}{{$\Delta$}}1
+}
+\lstset{style=javastyle}
+
+% ---------------------------------------------------------------------------
+% Capa
+% ---------------------------------------------------------------------------
+\title{Trabalho Prático\\\large Fundamentos de Projeto e Análise de Algoritmos (FPA)}
+\author{Gustavo Azi Prehl Gama \\ RA: 754737}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section*{Introdução}
+
+Este documento reúne as 10 questões do trabalho prático de FPA, resolvidas
+em LeetCode e Codeforces. Para cada questão são apresentados: (i) o código
+original submetido; (ii) a cópia integral da tela com a mensagem de aceite
+da plataforma; e (iii) uma justificativa de que o código resolve o problema,
+fundamentada na teoria de projeto e análise de algoritmos vista em sala
+(CLRS09 -- Cormen, Leiserson, Rivest, Stein, \emph{Introduction to
+Algorithms}, 3ª ed.).
+
+Em todas as questões, as análises de complexidade de tempo e espaço seguem a
+notação assintótica ($O$, $\Theta$, $\Omega$) apresentada em
+\emph{Notação Assintótica} [CLRS09, capítulo 3], complementando as
+referências específicas de cada estratégia indicadas em cada justificativa.
+
+\tableofcontents
+\newpage
+
+\input{sections/01_392}
+\newpage
+\input{sections/02_198}
+\newpage
+\input{sections/03_1042}
+\newpage
+\input{sections/04_3286}
+\newpage
+\input{sections/05_52}
+\newpage
+\input{sections/06_2360}
+\newpage
+\input{sections/07_516}
+\newpage
+\input{sections/08_1971}
+\newpage
+\input{sections/09_654}
+\newpage
+\input{sections/10_lakes}
+
+\end{document}
